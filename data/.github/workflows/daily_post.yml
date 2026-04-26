@@ -1,0 +1,67 @@
+name: Daily Bible Verse Post
+
+on:
+  schedule:
+    # 8:00 AM Bahrain time (UTC+3) = 05:00 UTC
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      preview:
+        description: 'Preview only (no posting)?'
+        default: 'false'
+      verse_id:
+        description: 'Force verse ID (optional)'
+        default: ''
+
+jobs:
+  post_verse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-bible-bot
+
+      - name: Install dependencies
+        run: pip install Pillow requests
+
+      - name: Restore verse rotation state
+        uses: actions/cache@v4
+        with:
+          path: data/state.json
+          key: verse-state-${{ github.run_number }}
+          restore-keys: verse-state-
+
+      - name: Run bot
+        env:
+          UNSPLASH_ACCESS_KEY : ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          OPENAI_API_KEY      : ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN        : ${{ secrets.PAT_TOKEN }}
+          GITHUB_USERNAME     : Equelinor
+          GITHUB_REPO         : his-verse-bot
+          MAKE_WEBHOOK_URL    : ${{ secrets.MAKE_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.preview }}" = "true" ]; then ARGS="$ARGS --preview"; fi
+          if [ -n "${{ github.event.inputs.verse_id }}" ]; then ARGS="$ARGS --verse ${{ github.event.inputs.verse_id }}"; fi
+          python bot.py $ARGS
+
+      - name: Save verse rotation state
+        uses: actions/cache@v4
+        with:
+          path: data/state.json
+          key: verse-state-${{ github.run_number }}
+
+      - name: Upload post image
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-${{ github.run_number }}
+          path: output/*.jpg
+          retention-days: 30

@@ -310,21 +310,26 @@ def generate_caption(verse_text, reference, theme, mood):
                     {
                         "role": "system",
                         "content": (
-                            "You write daily captions for a peaceful Christian Instagram page "
-                            "called 'his.verse.for.the.day'. Your captions are warm, intimate, "
-                            "and speak directly to the reader's heart — especially someone feeling "
-                            "anxious, tired, or lost. Never preachy. Never performative. Always personal.\n\n"
-                            "Format:\n"
-                            "- 2 short paragraphs of reflection\n"
-                            "- Blank line\n"
-                            "- Bible reference in italics: _Reference_\n"
-                            "- Blank line\n"
-                            "- Simple CTA ending with one emoji\n"
-                            "No hashtags. Under 180 words total."
+                            "You write ultra-short captions for a Christian Instagram page called his.verse.for.the.day. "
+                            "Warm, personal, and direct. Never preachy.
+
+"
+                            "Format — strictly follow this:
+"
+                            "Line 1: ONE punchy sentence that lands the emotion of the verse.
+"
+                            "Line 2: blank
+"
+                            "Line 3: _Reference_ in italics
+"
+                            "Line 4: blank
+"
+                            "Line 5: One short question that invites a comment. End with one emoji.
+"
+                            "Total: under 40 words. Short is powerful."
                         )
                     },
-                    {
-                        "role": "user",
+                    {"role": "user",
                         "content": (
                             f'Write an Instagram caption for this verse:\n\n'
                             f'"{verse_text}"\n— {reference}\n\n'

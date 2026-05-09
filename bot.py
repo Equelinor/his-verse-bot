@@ -398,14 +398,66 @@ def trigger_make(image_url, caption):
         print("  ⚠ No MAKE_WEBHOOK_URL — skipping trigger")
         return False
 
+    # Detect if this is a video (reel) or photo
+    is_video = image_url.endswith(".mp4")
     r = requests.post(
         MAKE_WEBHOOK_URL,
-        json={"image_url": image_url, "caption": caption},
+        json={"image_url": image_url, "caption": caption, "is_video": is_video},
         timeout=30,
     )
     r.raise_for_status()
     print(f"  ✓ Make webhook triggered — Instagram post queued")
     return True
+
+
+
+# ── REEL VIDEO GENERATION ────────────────────────────────────────────────────
+
+def generate_reel(image_path):
+    """Ken Burns zoom: converts square post image into a 10s 9:16 Reel MP4."""
+    import subprocess
+    img_path = Path(image_path)
+    reel_path = OUTPUT_DIR / img_path.name.replace(".jpg", ".mp4")
+
+    # Step 1: Scale square image to 9:16 with blurred background
+    frame_path = OUTPUT_DIR / img_path.name.replace(".jpg", "_frame.jpg")
+    scale_cmd = [
+        "ffmpeg", "-y", "-i", str(img_path),
+        "-filter_complex",
+        "[0:v]scale=1080:1080[fg];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=25:25[bg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]",
+        "-map", "[out]", "-frames:v", "1", str(frame_path)
+    ]
+    r1 = subprocess.run(scale_cmd, capture_output=True, timeout=60)
+    src = str(frame_path) if r1.returncode == 0 and frame_path.exists() else str(img_path)
+
+    # Step 2: Ken Burns zoom + fade in/out
+    ffmpeg_cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", src,
+        "-filter_complex",
+        "[0:v]zoompan=z='min(zoom+0.0008,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        ":d=300:s=1080x1920:fps=30,"
+        "fade=t=in:st=0:d=1.5,fade=t=out:st=8.5:d=1.5[out]",
+        "-map", "[out]", "-t", "10",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-r", "30",
+        str(reel_path)
+    ]
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+
+    # Cleanup temp frame
+    if frame_path.exists():
+        frame_path.unlink(missing_ok=True)
+
+    if result.returncode == 0:
+        size_mb = reel_path.stat().st_size / (1024*1024)
+        print(f"  ✓ Reel: {reel_path.name} ({size_mb:.1f}MB)")
+        return reel_path
+    else:
+        print(f"  ⚠ Reel failed — using photo post instead")
+        return None
 
 
 # ── MAIN PIPELINE ─────────────────────────────────────────────────────────────
@@ -436,7 +488,11 @@ def run(preview=False, verse_id=None):
     post_img.save(str(img_path), "JPEG", quality=97)
     print(f"  ✓ Saved: {img_path.name}")
 
-    # 5. Caption
+    # 5. Generate Reel
+    print("\n  🎬 Generating Reel video...")
+    reel_path = generate_reel(img_path)
+
+    # 6. Caption
     print("\n  ✍️  Writing caption...")
     caption_body = generate_caption(verse["text"], verse["reference"],
                                     verse["theme"], verse["mood"])
@@ -450,9 +506,10 @@ def run(preview=False, verse_id=None):
         print(f"\n  ✅ Done. Image: {img_path}\n")
         return img_path, full_caption
 
-    # 6. Upload to GitHub
-    print("\n  📤 Uploading image to GitHub...")
-    image_url = upload_to_github(str(img_path))
+    # 7. Upload to GitHub (reel if available, else photo)
+    upload_file = str(reel_path) if reel_path else str(img_path)
+    print(f"\n  📤 Uploading {'Reel' if reel_path else 'photo'} to GitHub...")
+    image_url = upload_to_github(upload_file)
     if not image_url:
         print("  ✗ Upload failed — aborting post")
         return None, None

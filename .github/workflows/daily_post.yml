@@ -21,7 +21,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install Pillow requests
+        run: |
+    sudo apt-get install -y ffmpeg
+    pip install Pillow requestsrun: pip install Pillow requests
       - name: Restore verse rotation state
         uses: actions/cache@v4
         with:

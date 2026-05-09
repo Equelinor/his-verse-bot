@@ -413,20 +413,28 @@ def trigger_make(image_url, caption):
 
 # ── REEL VIDEO GENERATION ────────────────────────────────────────────────────
 
-def generate_reel(image_path):
+# Mood to music file mapping
+MUSIC_MAP = {
+    "calm"      : "calm.mp3",
+    "reflective": "reflective.mp3",
+    "uplifting" : "uplifting.mp3",
+    "hope"      : "hope.mp3",
+    "faith"     : "faith.mp3",
+}
+
+def generate_reel(image_path, mood="calm"):
     """
-    Ken Burns Reel — fully fixed version:
-    - Background (blurred) zooms smoothly — no jitter
-    - Text layer is fixed, centered, never cut
-    - No double watermark (bg and text are separate sources)
-    - Clean fade in/out
+    Ken Burns Reel with mood-matched background music.
+    - Background (blurred) zooms smoothly
+    - Text layer fixed, never cut
+    - Music auto-selected by verse mood, trimmed/looped to 10s with fade
     """
     import subprocess
-    img_path = Path(image_path)
-    reel_path  = OUTPUT_DIR / img_path.name.replace(".jpg", ".mp4")
-    bg_path    = OUTPUT_DIR / img_path.name.replace(".jpg", "_bg.jpg")
+    img_path  = Path(image_path)
+    reel_path = OUTPUT_DIR / img_path.name.replace(".jpg", ".mp4")
+    bg_path   = OUTPUT_DIR / img_path.name.replace(".jpg", "_bg.jpg")
 
-    # Step 1: Create blurred 9:16 background (no text visible — pure blur)
+    # Step 1: Create blurred 9:16 background
     bg_cmd = [
         "ffmpeg", "-y", "-i", str(img_path),
         "-filter_complex",
@@ -439,40 +447,67 @@ def generate_reel(image_path):
         print("  ⚠ BG creation failed — using photo post")
         return None
 
-    # Step 2: Compose reel
-    # - BG layer: blurred 9:16, slow smooth zoom (Ken Burns)
-    # - FG layer: original square shrunk to 900px, centered — text fixed, never cut
-    ffmpeg_cmd = [
+    # Step 2: Pick music track by mood
+    music_file = MUSIC_MAP.get(mood, "calm.mp3")
+    music_path = BASE_DIR / music_file
+    has_music  = music_path.exists()
+
+    if has_music:
+        print(f"  🎵 Music: {music_file}")
+    else:
+        print(f"  ⚠ Music file not found: {music_path} — no audio")
+
+    # Step 3: Build FFmpeg command
+    inputs = [
         "ffmpeg", "-y",
-        "-loop", "1", "-i", str(bg_path),    # BG: blurred, will zoom
-        "-loop", "1", "-i", str(img_path),    # FG: text layer, stays fixed
-        "-filter_complex",
-        # BG: slow smooth zoom — very small step to reduce jitter
+        "-loop", "1", "-i", str(bg_path),    # [0] BG blurred
+        "-loop", "1", "-i", str(img_path),    # [1] Text layer
+    ]
+    if has_music:
+        inputs += ["-stream_loop", "-1", "-i", str(music_path)]  # [2] Audio loop
+
+    # Video filter: smooth zoom bg + fixed text overlay + fade
+    video_filter = (
         "[0:v]"
         "zoompan=z='if(lte(on,1),1.0,min(zoom+0.0003,1.08))'"
         ":x='iw/2-(iw/zoom/2)'"
         ":y='ih/2-(ih/zoom/2)'"
         ":d=300:s=1080x1920:fps=30"
         "[bg_zoom];"
-        # FG: shrink square to 900px, pad to 9:16, centered — text never hits edge
         "[1:v]scale=900:900,"
         "pad=1080:1920:90:510:color=black@0"
         "[fg_fixed];"
-        # Composite then fade
         "[bg_zoom][fg_fixed]overlay=0:0,"
         "fade=t=in:st=0:d=1.0,"
         "fade=t=out:st=9.0:d=1.0"
-        "[out]",
-        "-map", "[out]",
+        "[vout]"
+    )
+
+    filter_complex = ["-filter_complex", video_filter, "-map", "[vout]"]
+
+    if has_music:
+        # Audio: trim to 10s, fade in 1s, fade out 1.5s
+        audio_filter = [
+            "-filter_complex",
+            video_filter + ";"
+            "[2:a]atrim=0:10,afade=t=in:st=0:d=1.0,afade=t=out:st=8.5:d=1.5[aout]",
+            "-map", "[vout]",
+            "-map", "[aout]",
+        ]
+        filter_complex = audio_filter
+
+    ffmpeg_cmd = inputs + filter_complex + [
         "-t", "10",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", "30",
-        str(reel_path)
     ]
+    if has_music:
+        ffmpeg_cmd += ["-c:a", "aac", "-b:a", "128k"]
+
+    ffmpeg_cmd.append(str(reel_path))
 
     result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
 
-    # Cleanup
     if bg_path.exists():
         bg_path.unlink(missing_ok=True)
 
@@ -482,6 +517,7 @@ def generate_reel(image_path):
         return reel_path
     else:
         print(f"  ⚠ Reel failed — using photo post instead")
+        print(f"  {result.stderr[-200:]}")
         return None
 
 
@@ -515,7 +551,7 @@ def run(preview=False, verse_id=None):
 
     # 5. Generate Reel
     print("\n  🎬 Generating Reel video...")
-    reel_path = generate_reel(img_path)
+    reel_path = generate_reel(img_path, verse["mood"])
 
     # 6. Caption
     print("\n  ✍️  Writing caption...")

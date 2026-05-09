@@ -414,40 +414,57 @@ def trigger_make(image_url, caption):
 # ── REEL VIDEO GENERATION ────────────────────────────────────────────────────
 
 def generate_reel(image_path):
-    """Ken Burns zoom: converts square post image into a 10s 9:16 Reel MP4."""
+    """
+    Ken Burns zoom on background only — text stays fixed and sharp.
+    Fixes: text getting cut at edges, shaking/jitter.
+    """
     import subprocess
     img_path = Path(image_path)
     reel_path = OUTPUT_DIR / img_path.name.replace(".jpg", ".mp4")
-
-    # Step 1: Scale square image to 9:16 with blurred background
     frame_path = OUTPUT_DIR / img_path.name.replace(".jpg", "_frame.jpg")
+
+    # Step 1: Scale square to 9:16 with blurred bg padding
     scale_cmd = [
         "ffmpeg", "-y", "-i", str(img_path),
         "-filter_complex",
         "[0:v]scale=1080:1080[fg];"
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=25:25[bg];"
+        "crop=1080:1920,boxblur=30:30[bg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]",
         "-map", "[out]", "-frames:v", "1", str(frame_path)
     ]
     r1 = subprocess.run(scale_cmd, capture_output=True, timeout=60)
     src = str(frame_path) if r1.returncode == 0 and frame_path.exists() else str(img_path)
 
-    # Step 2: Ken Burns zoom + fade in/out
+    # Step 2: BG zooms slowly, text overlay stays fixed — no jitter
     ffmpeg_cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-i", src,
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", src,
+        "-loop", "1", "-i", str(img_path),
         "-filter_complex",
-        "[0:v]zoompan=z='min(zoom+0.0008,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        "[0:v]"
+        "zoompan=z='if(lte(on,1),1,min(zoom+0.0005,1.12))'"
+        ":x='iw/2-(iw/zoom/2)'"
+        ":y='ih/2-(ih/zoom/2)'"
         ":d=300:s=1080x1920:fps=30,"
-        "fade=t=in:st=0:d=1.5,fade=t=out:st=8.5:d=1.5[out]",
-        "-map", "[out]", "-t", "10",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "fade=t=in:st=0:d=1.2,"
+        "fade=t=out:st=8.8:d=1.2"
+        "[bg_zoom];"
+        "[1:v]scale=1080:1080,"
+        "pad=1080:1920:0:420:color=black@0,"
+        "fade=t=in:st=0.8:d=1.0,"
+        "fade=t=out:st=8.5:d=1.2"
+        "[fg_fixed];"
+        "[bg_zoom][fg_fixed]overlay=0:0[out]",
+        "-map", "[out]",
+        "-t", "10",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", "30",
         str(reel_path)
     ]
+
     result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
 
-    # Cleanup temp frame
     if frame_path.exists():
         frame_path.unlink(missing_ok=True)
 

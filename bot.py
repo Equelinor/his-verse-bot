@@ -63,6 +63,7 @@ MAKE_WEBHOOK_URL    = os.getenv("MAKE_WEBHOOK_URL", "")  # from Make scenario
 # ── POST SETTINGS ─────────────────────────────────────────────────────────────
 POST_SIZE = (1080, 1080)
 HANDLE    = "@his.verse.for.the.day"
+INSTAGRAM_URL = "https://www.instagram.com/his.verse.for.the.day"
 
 # Fonts (auto-downloaded on first run)
 FONT_URL_SERIF = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cormorantgaramond/CormorantGaramond-Italic.ttf"
@@ -344,13 +345,13 @@ def fallback_caption(verse_text, reference):
     return (
         f"Some days the weight of everything feels like too much to carry alone. "
         f"But you were never meant to carry it alone.\n\n"
-        f"This verse is not a suggestion — it is a promise.\n\n"
         f"_{reference}_\n\n"
         f"Save this for when you need it most. 🙏"
     )
 
 def build_full_caption(body):
-    return f"{body}\n\n.\n.\n.\n{get_hashtags()}"
+    follow_line = f"✨ Follow for your daily verse 👉 {INSTAGRAM_URL}"
+    return f"{body}\n\n{follow_line}\n\n.\n.\n.\n{get_hashtags()}"
 
 
 # ── GITHUB IMAGE UPLOAD ───────────────────────────────────────────────────────
@@ -398,7 +399,6 @@ def trigger_make(image_url, caption):
         print("  ⚠ No MAKE_WEBHOOK_URL — skipping trigger")
         return False
 
-    # Detect if this is a video (reel) or photo
     is_video = image_url.endswith(".mp4")
     r = requests.post(
         MAKE_WEBHOOK_URL,
@@ -410,10 +410,8 @@ def trigger_make(image_url, caption):
     return True
 
 
-
 # ── REEL VIDEO GENERATION ────────────────────────────────────────────────────
 
-# Mood to music file mapping
 MUSIC_MAP = {
     "calm"      : "calm.mp3",
     "reflective": "reflective.mp3",
@@ -423,18 +421,11 @@ MUSIC_MAP = {
 }
 
 def generate_reel(image_path, mood="calm"):
-    """
-    Ken Burns Reel with mood-matched background music.
-    - Background (blurred) zooms smoothly
-    - Text layer fixed, never cut
-    - Music auto-selected by verse mood, trimmed/looped to 10s with fade
-    """
     import subprocess
     img_path  = Path(image_path)
     reel_path = OUTPUT_DIR / img_path.name.replace(".jpg", ".mp4")
     bg_path   = OUTPUT_DIR / img_path.name.replace(".jpg", "_bg.jpg")
 
-    # Step 1: Create blurred 9:16 background
     bg_cmd = [
         "ffmpeg", "-y", "-i", str(img_path),
         "-filter_complex",
@@ -447,7 +438,6 @@ def generate_reel(image_path, mood="calm"):
         print("  ⚠ BG creation failed — using photo post")
         return None
 
-    # Step 2: Pick music track by mood
     music_file = MUSIC_MAP.get(mood, "calm.mp3")
     music_path = BASE_DIR / music_file
     has_music  = music_path.exists()
@@ -457,16 +447,14 @@ def generate_reel(image_path, mood="calm"):
     else:
         print(f"  ⚠ Music file not found: {music_path} — no audio")
 
-    # Step 3: Build FFmpeg command
     inputs = [
         "ffmpeg", "-y",
-        "-loop", "1", "-i", str(bg_path),    # [0] BG blurred
-        "-loop", "1", "-i", str(img_path),    # [1] Text layer
+        "-loop", "1", "-i", str(bg_path),
+        "-loop", "1", "-i", str(img_path),
     ]
     if has_music:
-        inputs += ["-stream_loop", "-1", "-i", str(music_path)]  # [2] Audio loop
+        inputs += ["-stream_loop", "-1", "-i", str(music_path)]
 
-    # Video filter: smooth zoom bg + fixed text overlay + fade
     video_filter = (
         "[0:v]"
         "zoompan=z='if(lte(on,1),1.0,min(zoom+0.0003,1.08))'"
@@ -486,7 +474,6 @@ def generate_reel(image_path, mood="calm"):
     filter_complex = ["-filter_complex", video_filter, "-map", "[vout]"]
 
     if has_music:
-        # Audio: trim to 10s, fade in 1s, fade out 1.5s
         audio_filter = [
             "-filter_complex",
             video_filter + ";"
@@ -529,19 +516,15 @@ def run(preview=False, verse_id=None):
     print(f"   {datetime.datetime.now().strftime('%A, %B %d %Y — %H:%M')}")
     print("═══════════════════════════════════════════\n")
 
-    # 1. Select verse
     verse, state = select_verse(verse_id)
     print(f"  📖 {verse['reference']} ({verse['theme']} / {verse['mood']})")
 
-    # 2. Fetch background
     print("\n  🌄 Fetching background image...")
     bg = fetch_image(verse["image_keywords"], verse["mood"])
 
-    # 3. Load fonts
     print("\n  🔤 Loading fonts...")
     fonts = load_fonts()
 
-    # 4. Composite
     print("\n  🎨 Compositing post...")
     post_img = composite_post(bg, verse["text"], verse["reference"], verse["mood"], fonts)
     today    = datetime.date.today().strftime("%Y-%m-%d")
@@ -549,11 +532,9 @@ def run(preview=False, verse_id=None):
     post_img.save(str(img_path), "JPEG", quality=97)
     print(f"  ✓ Saved: {img_path.name}")
 
-    # 5. Generate Reel
     print("\n  🎬 Generating Reel video...")
     reel_path = generate_reel(img_path, verse["mood"])
 
-    # 6. Caption
     print("\n  ✍️  Writing caption...")
     caption_body = generate_caption(verse["text"], verse["reference"],
                                     verse["theme"], verse["mood"])
@@ -567,7 +548,6 @@ def run(preview=False, verse_id=None):
         print(f"\n  ✅ Done. Image: {img_path}\n")
         return img_path, full_caption
 
-    # 7. Upload to GitHub (reel if available, else photo)
     upload_file = str(reel_path) if reel_path else str(img_path)
     print(f"\n  📤 Uploading {'Reel' if reel_path else 'photo'} to GitHub...")
     image_url = upload_to_github(upload_file)
@@ -575,11 +555,9 @@ def run(preview=False, verse_id=None):
         print("  ✗ Upload failed — aborting post")
         return None, None
 
-    # 7. Trigger Make → Instagram
     print("\n  📱 Triggering Make webhook...")
     trigger_make(image_url, full_caption)
 
-    # 8. Update state
     posted = state.get("posted_ids", [])
     posted.append(int(verse["id"]))
     state["posted_ids"]  = posted

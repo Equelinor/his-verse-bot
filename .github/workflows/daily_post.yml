@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          sudo apt-get install -y ffmpeg
+          sudo apt-get update --fix-missing && sudo apt-get install -y ffmpeg --fix-missing
           pip install Pillow requests
       - name: Restore verse rotation state
         uses: actions/cache@v4

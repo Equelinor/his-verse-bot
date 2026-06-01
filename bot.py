@@ -14,17 +14,18 @@ Cost breakdown:
   - Posting:     Make → Instagram       → $0.00
 
 Pipeline:
-  GitHub Actions (8AM daily)
-    → picks verse → fetches image → composites post
+  GitHub Actions (daily)
+    → picks verse/engagement reel → fetches image → composites post
     → writes caption via OpenAI
     → uploads image to GitHub repo (raw URL)
     → pings Make webhook with image URL + caption
-    → Make posts to Instagram via his.verse.for.the.day
+    → Make posts to Instagram + Facebook via his.verse.for.the.day
 
 Usage:
-  python bot.py               # Full pipeline
-  python bot.py --preview     # Generate image + caption only, no posting
-  python bot.py --verse 7     # Force a specific verse ID
+  python bot.py                        # Full pipeline (verse post)
+  python bot.py --mode engagement      # Engagement reel post
+  python bot.py --preview              # Generate only, no posting
+  python bot.py --verse 7              # Force a specific verse ID
 """
 
 import os
@@ -41,36 +42,36 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-BASE_DIR    = Path(__file__).parent
-DATA_DIR    = BASE_DIR / "data"
-OUTPUT_DIR  = BASE_DIR / "output"
-FONTS_DIR   = BASE_DIR / "fonts"
-STATE_FILE  = DATA_DIR / "state.json"
-VERSES_FILE = DATA_DIR / "verses.csv"
+BASE_DIR            = Path(__file__).parent
+DATA_DIR            = BASE_DIR / "data"
+OUTPUT_DIR          = BASE_DIR / "output"
+FONTS_DIR           = BASE_DIR / "fonts"
+STATE_FILE          = DATA_DIR / "state.json"
+ENGAGEMENT_STATE    = DATA_DIR / "engagement_state.json"
+VERSES_FILE         = DATA_DIR / "verses.csv"
+ENGAGEMENT_FILE     = DATA_DIR / "engagement_reels.csv"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 FONTS_DIR.mkdir(exist_ok=True)
 
-# ── SECRETS (set as GitHub Actions secrets) ───────────────────────────────────
+# ── SECRETS ───────────────────────────────────────────────────────────────────
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
 GITHUB_TOKEN        = os.getenv("GITHUB_TOKEN", "")
 GITHUB_USERNAME     = os.getenv("GITHUB_USERNAME", "Equelinor")
 GITHUB_REPO         = os.getenv("GITHUB_REPO", "his-verse-bot")
-MAKE_WEBHOOK_URL    = os.getenv("MAKE_WEBHOOK_URL", "")  # from Make scenario
+MAKE_WEBHOOK_URL    = os.getenv("MAKE_WEBHOOK_URL", "")
 
 # ── POST SETTINGS ─────────────────────────────────────────────────────────────
-POST_SIZE = (1080, 1080)
-HANDLE    = "@his.verse.for.the.day"
+POST_SIZE     = (1080, 1080)
+HANDLE        = "@his.verse.for.the.day"
 INSTAGRAM_URL = "https://www.instagram.com/his.verse.for.the.day"
 
-# Fonts (auto-downloaded on first run)
 FONT_URL_SERIF = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cormorantgaramond/CormorantGaramond-Italic.ttf"
 FONT_URL_LIGHT = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/cormorantgaramond/CormorantGaramond-Light.ttf"
 FONT_URL_SANS  = "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/lato/Lato-Light.ttf"
 
-# System font fallbacks
 SYSTEM_FONTS = {
     "serif": [
         "/usr/share/fonts/truetype/google-fonts/Lora-Italic-Variable.ttf",
@@ -82,7 +83,7 @@ SYSTEM_FONTS = {
     ],
 }
 
-# ── HASHTAG BANK (rotates weekly) ─────────────────────────────────────────────
+# ── HASHTAG BANK ──────────────────────────────────────────────────────────────
 HASHTAG_POOLS = {
     "A": "#bibleverseoftheday #dailyword #faithquotes #christianinstagram #godsword #scripturequotes #verseoftheday #bibleverse #christianity #prayerwarrior #godislove #jesuslovesyou #dailydevotional #bibleinstagram #faithoverfear #godsgrace #scripture #biblequotes #christianquotes #hopeinfaith #spiritualwellness #innerpeace #hisversefortheday #trustgod #godisfaithful #dailyinspiration #christianlife #wordofgod #blessedlife #godsplan",
     "B": "#morningdevotion #christisking #biblelovers #scripturememory #christianmotivation #godspromises #holybible #jesusfreak #prayerandfasting #spiritfilled #faithwalk #godscreation #praiseandworship #christianfaith #redeemed #kingdomofgod #graceupongrace #divinelove #godspeaks #hisversefortheday #christianquotes #bibletruth #prayerlife #godisgreat #worshipeveryday",
@@ -103,6 +104,14 @@ def load_state():
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+def load_engagement_state():
+    if ENGAGEMENT_STATE.exists():
+        return json.loads(ENGAGEMENT_STATE.read_text())
+    return {"posted_ids": [], "last_posted": ""}
+
+def save_engagement_state(state):
+    ENGAGEMENT_STATE.write_text(json.dumps(state, indent=2))
 
 
 # ── VERSE SELECTION ───────────────────────────────────────────────────────────
@@ -130,6 +139,29 @@ def select_verse(verse_id=None):
     return random.choice(remaining), state
 
 
+# ── ENGAGEMENT REEL SELECTION ─────────────────────────────────────────────────
+
+def load_engagement_reels():
+    with open(ENGAGEMENT_FILE, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+def select_engagement_reel():
+    reels = load_engagement_reels()
+    state = load_engagement_state()
+
+    posted    = set(state.get("posted_ids", []))
+    remaining = [r for r in reels if int(r["id"]) not in posted]
+
+    if not remaining:
+        state["posted_ids"] = []
+        remaining = reels
+
+    # sequential — go in order, not random
+    remaining_sorted = sorted(remaining, key=lambda x: int(x["id"]))
+    reel = remaining_sorted[0]
+    return reel, state
+
+
 # ── FONTS ─────────────────────────────────────────────────────────────────────
 
 def ensure_font(filename, url, size, fallback_key="serif"):
@@ -140,7 +172,7 @@ def ensure_font(filename, url, size, fallback_key="serif"):
             r = requests.get(url, timeout=30)
             r.raise_for_status()
             path.write_bytes(r.content)
-            ImageFont.truetype(str(path), size)  # verify
+            ImageFont.truetype(str(path), size)
         except Exception as e:
             print(f"  ⚠ Font download failed ({e}) — using system fallback")
             path.unlink(missing_ok=True)
@@ -189,7 +221,6 @@ def fetch_image(keywords, mood):
         except Exception as e:
             print(f"  ⚠ Unsplash failed: {e} — using gradient")
 
-    # Gradient fallback
     palettes = {
         "calm"      : [(8, 18, 40),  (30, 50, 90)],
         "uplifting" : [(70, 35, 5),  (160, 90, 15)],
@@ -229,10 +260,9 @@ def wrap_text(text, font, max_width, draw):
         result.append((line, int((bbox[3]-bbox[1])*1.42)))
     return result
 
-def composite_post(bg_img, verse_text, reference, mood, fonts):
+def composite_post(bg_img, verse_text, reference, mood, fonts, video_text=None):
     W, H = POST_SIZE
 
-    # Crop to square
     img = bg_img.copy()
     r   = img.width / img.height
     nw  = int(W * r) if r > 1 else W
@@ -241,16 +271,14 @@ def composite_post(bg_img, verse_text, reference, mood, fonts):
     img = img.crop(((img.width-W)//2, (img.height-H)//2,
                     (img.width-W)//2+W, (img.height-H)//2+H))
 
-    # Color grade
     img = ImageEnhance.Color(img).enhance(0.82)
     if mood == "uplifting":
-        r,g,b = img.split()
-        img = Image.merge("RGB",(r.point(lambda i:min(255,int(i*1.04))),g,b))
+        r2,g,b = img.split()
+        img = Image.merge("RGB",(r2.point(lambda i:min(255,int(i*1.04))),g,b))
     elif mood == "calm":
-        r,g,b = img.split()
-        img = Image.merge("RGB",(r,g,b.point(lambda i:min(255,int(i*1.04)))))
+        r2,g,b = img.split()
+        img = Image.merge("RGB",(r2,g,b.point(lambda i:min(255,int(i*1.04)))))
 
-    # Overlays
     ov  = Image.new("RGBA",(W,H),(0,0,0,0))
     dov = ImageDraw.Draw(ov)
     for y in range(H//3):
@@ -260,28 +288,55 @@ def composite_post(bg_img, verse_text, reference, mood, fonts):
     for m in range(0,180,4):
         dov.rectangle([m,m,W-m,H-m],outline=(0,0,0,int(70*(1-m/180))))
 
-    img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+    img  = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # Ghost quote mark
     draw.text((50,130), "\u201C", font=fonts["quote"], fill=(255,255,255,35))
 
-    # Reference top-left
-    draw.text((58,50), reference, font=fonts["ref"], fill=(255,255,255,175))
+    # If engagement reel — show video_text at top, verse smaller below
+    if video_text:
+        # Video text (hook line) at top
+        vt_font = ensure_font("CormorantGaramond-Italic.ttf", FONT_URL_SERIF, 52, "serif")
+        wrapped_vt = wrap_text(video_text, vt_font, W-140, draw)
+        sy = 80
+        for lt, lh in wrapped_vt:
+            bbox = draw.textbbox((0,0), lt, font=vt_font)
+            x = (W-(bbox[2]-bbox[0]))//2
+            draw.text((x+2,sy+3), lt, font=vt_font, fill=(0,0,0,115))
+            draw.text((x,sy),     lt, font=vt_font, fill=(255,255,220,240))
+            sy += lh
 
-    # Verse text centered
-    wrapped = wrap_text(verse_text, fonts["verse"], W-140, draw)
-    total_h = sum(lh for _,lh in wrapped)
-    sy      = (H-total_h)//2 + 25
-    for lt,lh in wrapped:
-        bbox = draw.textbbox((0,0),lt,font=fonts["verse"])
-        x    = (W-(bbox[2]-bbox[0]))//2
-        draw.text((x+2,sy+3), lt, font=fonts["verse"], fill=(0,0,0,115))
-        draw.text((x,sy),     lt, font=fonts["verse"], fill=(255,255,255,252))
-        sy += lh
+        # Divider
+        draw.line([(W//2-40, sy+10),(W//2+40, sy+10)], fill=(255,255,255,80), width=1)
+        sy += 30
 
-    # Divider
-    draw.line([(W//2-28,sy+16),(W//2+28,sy+16)], fill=(255,255,255,90), width=1)
+        # Verse text centered below
+        wrapped = wrap_text(verse_text, fonts["verse"], W-140, draw)
+        for lt,lh in wrapped:
+            bbox = draw.textbbox((0,0),lt,font=fonts["verse"])
+            x    = (W-(bbox[2]-bbox[0]))//2
+            draw.text((x+2,sy+3), lt, font=fonts["verse"], fill=(0,0,0,115))
+            draw.text((x,sy),     lt, font=fonts["verse"], fill=(255,255,255,252))
+            sy += lh
+
+        # Reference
+        draw.line([(W//2-28,sy+16),(W//2+28,sy+16)], fill=(255,255,255,90), width=1)
+        bbox_r = draw.textbbox((0,0), reference, font=fonts["ref"])
+        draw.text(((W-(bbox_r[2]-bbox_r[0]))//2, sy+28), reference,
+                  font=fonts["ref"], fill=(255,255,255,175))
+    else:
+        # Standard verse post layout
+        draw.text((58,50), reference, font=fonts["ref"], fill=(255,255,255,175))
+        wrapped = wrap_text(verse_text, fonts["verse"], W-140, draw)
+        total_h = sum(lh for _,lh in wrapped)
+        sy      = (H-total_h)//2 + 25
+        for lt,lh in wrapped:
+            bbox = draw.textbbox((0,0),lt,font=fonts["verse"])
+            x    = (W-(bbox[2]-bbox[0]))//2
+            draw.text((x+2,sy+3), lt, font=fonts["verse"], fill=(0,0,0,115))
+            draw.text((x,sy),     lt, font=fonts["verse"], fill=(255,255,255,252))
+            sy += lh
+        draw.line([(W//2-28,sy+16),(W//2+28,sy+16)], fill=(255,255,255,90), width=1)
 
     # Handle watermark
     bbox_h = draw.textbbox((0,0),HANDLE,font=fonts["handle"])
@@ -291,7 +346,7 @@ def composite_post(bg_img, verse_text, reference, mood, fonts):
     return img
 
 
-# ── CAPTION (OpenAI GPT-4o-mini) ─────────────────────────────────────────────
+# ── CAPTION ───────────────────────────────────────────────────────────────────
 
 def generate_caption(verse_text, reference, theme, mood):
     if not OPENAI_API_KEY:
@@ -354,7 +409,7 @@ def build_full_caption(body):
     return f"{body}\n\n{follow_line}\n\n.\n.\n.\n{get_hashtags()}"
 
 
-# ── GITHUB IMAGE UPLOAD ───────────────────────────────────────────────────────
+# ── GITHUB UPLOAD ─────────────────────────────────────────────────────────────
 
 def upload_to_github(image_path):
     if not GITHUB_TOKEN:
@@ -373,7 +428,6 @@ def upload_to_github(image_path):
     with open(image_path, "rb") as f:
         content_b64 = base64.b64encode(f.read()).decode()
 
-    # Check if exists
     sha = None
     check = requests.get(api_url, headers=headers, timeout=15)
     if check.status_code == 200:
@@ -392,7 +446,7 @@ def upload_to_github(image_path):
     return raw_url
 
 
-# ── MAKE WEBHOOK TRIGGER ──────────────────────────────────────────────────────
+# ── MAKE WEBHOOK ──────────────────────────────────────────────────────────────
 
 def trigger_make(image_url, caption):
     if not MAKE_WEBHOOK_URL:
@@ -406,11 +460,11 @@ def trigger_make(image_url, caption):
         timeout=30,
     )
     r.raise_for_status()
-    print(f"  ✓ Make webhook triggered — Instagram post queued")
+    print(f"  ✓ Make webhook triggered — post queued")
     return True
 
 
-# ── REEL VIDEO GENERATION ────────────────────────────────────────────────────
+# ── REEL GENERATION ───────────────────────────────────────────────────────────
 
 MUSIC_MAP = {
     "calm"      : "calm.mp3",
@@ -510,66 +564,140 @@ def generate_reel(image_path, mood="calm"):
 
 # ── MAIN PIPELINE ─────────────────────────────────────────────────────────────
 
-def run(preview=False, verse_id=None):
+def run(preview=False, verse_id=None, mode="verse"):
     print("\n═══════════════════════════════════════════")
     print("   his.verse.for.the.day — Daily Bot")
     print(f"   {datetime.datetime.now().strftime('%A, %B %d %Y — %H:%M')}")
+    print(f"   Mode: {'📖 Verse' if mode == 'verse' else '💬 Engagement'}")
     print("═══════════════════════════════════════════\n")
 
-    verse, state = select_verse(verse_id)
-    print(f"  📖 {verse['reference']} ({verse['theme']} / {verse['mood']})")
+    if mode == "engagement":
+        # ── ENGAGEMENT REEL PIPELINE ──────────────────────────────────────────
+        reel, state = select_engagement_reel()
+        print(f"  💬 Engagement Reel #{reel['id']} — {reel['format']}")
+        print(f"  📖 {reel['verse_ref']}")
 
-    print("\n  🌄 Fetching background image...")
-    bg = fetch_image(verse["image_keywords"], verse["mood"])
+        # Use verse keywords to pick a thematic background
+        mood     = reel["mood"]
+        keywords = mood  # simple keyword — calm/reflective/uplifting
 
-    print("\n  🔤 Loading fonts...")
-    fonts = load_fonts()
+        print("\n  🌄 Fetching background image...")
+        bg = fetch_image(keywords, mood)
 
-    print("\n  🎨 Compositing post...")
-    post_img = composite_post(bg, verse["text"], verse["reference"], verse["mood"], fonts)
-    today    = datetime.date.today().strftime("%Y-%m-%d")
-    img_path = OUTPUT_DIR / f"post_{today}_{verse['id']}.jpg"
-    post_img.save(str(img_path), "JPEG", quality=97)
-    print(f"  ✓ Saved: {img_path.name}")
+        print("\n  🔤 Loading fonts...")
+        fonts = load_fonts()
 
-    print("\n  🎬 Generating Reel video...")
-    reel_path = generate_reel(img_path, verse["mood"])
+        print("\n  🎨 Compositing engagement reel...")
+        post_img = composite_post(
+            bg,
+            reel["verse"],
+            reel["verse_ref"],
+            mood,
+            fonts,
+            video_text=reel["video_text"]
+        )
 
-    print("\n  ✍️  Writing caption...")
-    caption_body = generate_caption(verse["text"], verse["reference"],
-                                    verse["theme"], verse["mood"])
-    full_caption = build_full_caption(caption_body)
-    print(f"\n  ── Caption preview ───────────────────────")
-    print(f"  {caption_body[:200]}...")
-    print(f"  ──────────────────────────────────────────")
+        today    = datetime.date.today().strftime("%Y-%m-%d")
+        img_path = OUTPUT_DIR / f"engagement_{today}_{reel['id']}.jpg"
+        post_img.save(str(img_path), "JPEG", quality=97)
+        print(f"  ✓ Saved: {img_path.name}")
 
-    if preview:
-        print("\n  🔍 Preview mode — skipping upload and posting")
-        print(f"\n  ✅ Done. Image: {img_path}\n")
+        print("\n  🎬 Generating Reel video...")
+        reel_path = generate_reel(img_path, mood)
+
+        # Caption is taken directly from CSV — no OpenAI needed
+        caption_body = reel["caption"]
+        full_caption = build_full_caption(caption_body)
+
+        print(f"\n  ── Caption preview ───────────────────────")
+        print(f"  {caption_body[:200]}")
+        print(f"  ──────────────────────────────────────────")
+
+        if preview:
+            print("\n  🔍 Preview mode — skipping upload and posting")
+            print(f"\n  ✅ Done. Image: {img_path}\n")
+            return img_path, full_caption
+
+        upload_file = str(reel_path) if reel_path else str(img_path)
+        print(f"\n  📤 Uploading {'Reel' if reel_path else 'photo'} to GitHub...")
+        image_url = upload_to_github(upload_file)
+        if not image_url:
+            print("  ✗ Upload failed — aborting post")
+            return None, None
+
+        print("\n  📱 Triggering Make webhook...")
+        trigger_make(image_url, full_caption)
+
+        posted = state.get("posted_ids", [])
+        posted.append(int(reel["id"]))
+        state["posted_ids"]  = posted
+        state["last_posted"] = today
+        save_engagement_state(state)
+
+        total     = len(load_engagement_reels())
+        remaining = total - len(posted)
+        print(f"\n  ✅ Complete! Engagement Reel #{reel['id']} of {total}")
+        print(f"     {remaining} reels remaining in queue\n")
+
         return img_path, full_caption
 
-    upload_file = str(reel_path) if reel_path else str(img_path)
-    print(f"\n  📤 Uploading {'Reel' if reel_path else 'photo'} to GitHub...")
-    image_url = upload_to_github(upload_file)
-    if not image_url:
-        print("  ✗ Upload failed — aborting post")
-        return None, None
+    else:
+        # ── VERSE POST PIPELINE (unchanged) ──────────────────────────────────
+        verse, state = select_verse(verse_id)
+        print(f"  📖 {verse['reference']} ({verse['theme']} / {verse['mood']})")
 
-    print("\n  📱 Triggering Make webhook...")
-    trigger_make(image_url, full_caption)
+        print("\n  🌄 Fetching background image...")
+        bg = fetch_image(verse["image_keywords"], verse["mood"])
 
-    posted = state.get("posted_ids", [])
-    posted.append(int(verse["id"]))
-    state["posted_ids"]  = posted
-    state["last_posted"] = today
-    save_state(state)
+        print("\n  🔤 Loading fonts...")
+        fonts = load_fonts()
 
-    total     = len(load_verses())
-    remaining = total - len(posted)
-    print(f"\n  ✅ Complete! Verse #{verse['id']} of {total}")
-    print(f"     {remaining} verses remaining in rotation\n")
+        print("\n  🎨 Compositing post...")
+        post_img = composite_post(bg, verse["text"], verse["reference"], verse["mood"], fonts)
+        today    = datetime.date.today().strftime("%Y-%m-%d")
+        img_path = OUTPUT_DIR / f"post_{today}_{verse['id']}.jpg"
+        post_img.save(str(img_path), "JPEG", quality=97)
+        print(f"  ✓ Saved: {img_path.name}")
 
-    return img_path, full_caption
+        print("\n  🎬 Generating Reel video...")
+        reel_path = generate_reel(img_path, verse["mood"])
+
+        print("\n  ✍️  Writing caption...")
+        caption_body = generate_caption(verse["text"], verse["reference"],
+                                        verse["theme"], verse["mood"])
+        full_caption = build_full_caption(caption_body)
+        print(f"\n  ── Caption preview ───────────────────────")
+        print(f"  {caption_body[:200]}...")
+        print(f"  ──────────────────────────────────────────")
+
+        if preview:
+            print("\n  🔍 Preview mode — skipping upload and posting")
+            print(f"\n  ✅ Done. Image: {img_path}\n")
+            return img_path, full_caption
+
+        upload_file = str(reel_path) if reel_path else str(img_path)
+        print(f"\n  📤 Uploading {'Reel' if reel_path else 'photo'} to GitHub...")
+        image_url = upload_to_github(upload_file)
+        if not image_url:
+            print("  ✗ Upload failed — aborting post")
+            return None, None
+
+        print("\n  📱 Triggering Make webhook...")
+        trigger_make(image_url, full_caption)
+
+        posted = state.get("posted_ids", [])
+        posted.append(int(verse["id"]))
+        state["posted_ids"]  = state.get("posted_ids", [])
+        state["posted_ids"].append(int(verse["id"]))
+        state["last_posted"] = today
+        save_state(state)
+
+        total     = len(load_verses())
+        remaining = total - len(state["posted_ids"])
+        print(f"\n  ✅ Complete! Verse #{verse['id']} of {total}")
+        print(f"     {remaining} verses remaining in rotation\n")
+
+        return img_path, full_caption
 
 
 # ── ENTRY ─────────────────────────────────────────────────────────────────────
@@ -578,5 +706,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", action="store_true", help="Generate only, do not post")
     parser.add_argument("--verse",   type=int, default=None, help="Force specific verse ID")
+    parser.add_argument("--mode",    type=str, default="verse",
+                        choices=["verse","engagement"], help="Post mode")
     args = parser.parse_args()
-    run(preview=args.preview, verse_id=args.verse)
+    run(preview=args.preview, verse_id=args.verse, mode=args.mode)

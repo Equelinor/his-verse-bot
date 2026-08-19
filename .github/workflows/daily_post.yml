@@ -1,8 +1,9 @@
 name: Daily Bible Verse Post
+
 on:
   schedule:
-    - cron: '0 11 * * *'
-    - cron: '0 17 * * *'
+    - cron: '0 11 * * *'   # 2:00 PM Bahrain — verse post
+    - cron: '0 17 * * *'   # 8:00 PM Bahrain — engagement post
   workflow_dispatch:
     inputs:
       preview:
@@ -14,6 +15,7 @@ on:
       mode:
         description: 'Post mode: verse or engagement'
         default: 'verse'
+
 jobs:
   post_verse:
     runs-on: ubuntu-latest
@@ -40,6 +42,27 @@ jobs:
           path: data/engagement_state.json
           key: engagement-state-${{ github.run_number }}
           restore-keys: engagement-state-
+
+      - name: Determine post mode
+        id: mode
+        run: |
+          # Priority 1: manual override via workflow_dispatch
+          if [ "${{ github.event.inputs.mode }}" = "engagement" ]; then
+            echo "MODE=engagement" >> "$GITHUB_ENV"
+            echo "→ Mode: engagement (manual override)"
+          elif [ "${{ github.event.inputs.mode }}" = "verse" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "MODE=verse" >> "$GITHUB_ENV"
+            echo "→ Mode: verse (manual override)"
+          # Priority 2: which cron schedule actually fired this run —
+          # reliable regardless of execution delay, unlike checking wall-clock hour
+          elif [ "${{ github.event.schedule }}" = "0 17 * * *" ]; then
+            echo "MODE=engagement" >> "$GITHUB_ENV"
+            echo "→ Mode: engagement (matched 17:00 UTC schedule)"
+          else
+            echo "MODE=verse" >> "$GITHUB_ENV"
+            echo "→ Mode: verse (matched 11:00 UTC schedule or default)"
+          fi
+
       - name: Run bot
         env:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
@@ -52,15 +75,9 @@ jobs:
           ARGS=""
           if [ "${{ github.event.inputs.preview }}" = "true" ]; then ARGS="$ARGS --preview"; fi
           if [ -n "${{ github.event.inputs.verse_id }}" ]; then ARGS="$ARGS --verse ${{ github.event.inputs.verse_id }}"; fi
-          HOUR=$(date +%H)
-          if [ "${{ github.event.inputs.mode }}" = "engagement" ]; then
-            MODE="engagement"
-          elif [ "$HOUR" = "17" ]; then
-            MODE="engagement"
-          else
-            MODE="verse"
-          fi
+          echo "Running bot.py with mode=$MODE"
           python bot.py $ARGS --mode $MODE
+
       - name: Save verse rotation state
         uses: actions/cache@v4
         with:

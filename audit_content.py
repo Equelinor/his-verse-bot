@@ -9,6 +9,7 @@ Usage: python audit_content.py
 """
 import csv
 import sys
+import unicodedata
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -172,6 +173,39 @@ def main():
     overpromise = [r for r in night if any(m in r["ending"].lower() for m in OVERPROMISE_MARKERS)]
     overpromise += [r for r in night if any(m in r["prayer"].lower() for m in OVERPROMISE_MARKERS)]
     record("17. No over-promising Night language", len(overpromise) == 0, f"found={len(overpromise)}")
+
+    # 17b. Emoji in the SOURCE fields that get rendered directly INTO the
+    # image via Pillow (hook/prayer/ending/theme for Night; question/cta/
+    # dominant_theme for Morning) is EXPECTED and fine — those same fields
+    # are reused for the caption text, where emoji renders correctly via
+    # Instagram/Facebook's own text engine. What actually matters is
+    # whether bot.py's draw-time stripping (strip_emoji_for_display)
+    # successfully removes it before it reaches Pillow, which lacks emoji
+    # glyphs in its fallback fonts and would render a broken box otherwise.
+    # This check imports that exact function and verifies it actually
+    # works against every real value in the content pool — not just that
+    # raw data happens to be emoji-free, which isn't the real requirement.
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from bot import strip_emoji_for_display, has_emoji as _bot_has_emoji
+        emoji_check_available = True
+    except ImportError:
+        emoji_check_available = False
+
+    if emoji_check_available:
+        image_fields_night = ["hook", "prayer", "ending", "theme"]
+        image_fields_morning = ["question", "cta", "dominant_theme"]
+        leaks_night = [(r["id"], f) for r in night for f in image_fields_night
+                       if _bot_has_emoji(strip_emoji_for_display(r[f]))]
+        leaks_morning = [(r["id"], f) for r in morning for f in image_fields_morning
+                         if _bot_has_emoji(strip_emoji_for_display(r[f]))]
+        record("17b. Night image-render emoji stripping works for all rows", len(leaks_night) == 0,
+               f"leaks_after_strip={len(leaks_night)}")
+        record("17b. Morning image-render emoji stripping works for all rows", len(leaks_morning) == 0,
+               f"leaks_after_strip={len(leaks_morning)}")
+    else:
+        print("ℹ️  17b. Skipped — bot.py not importable from this location "
+              "(informational only, not a hard requirement here)")
 
     # 18. Static same-day collisions between Night and Morning = 0
     collisions = sum(1 for i in range(min(len(night), len(morning)))

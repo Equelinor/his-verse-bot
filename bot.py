@@ -500,23 +500,56 @@ def strip_emoji_for_display(text):
     a broken box. This only affects what gets drawn on the image; the
     original text (with emoji intact) is still used for the caption sent
     to Instagram/Facebook, which render emoji correctly on their own.
-    Bug found during final pre-launch review: endings/CTAs pulled from the
-    content pool can contain emoji (e.g. 🤍, 🙏) that weren't caught by
-    the earlier title/choice-icon fix, since those only stripped emoji
-    from specific known-emoji fields, not every field that gets drawn."""
-    import unicodedata
-    return "".join(
-        ch for ch in text
-        if not (unicodedata.category(ch) == "So" or ord(ch) > 0x1F000)
-    ).rstrip()
+
+    Handles the full construction, not just the visible base character:
+    many common emoji (❤️ ✍️ ☀️ etc.) are actually TWO codepoints — a
+    base symbol that's centuries-old Unicode (category 'So', caught by
+    the main check) followed by an invisible VARIATION SELECTOR-16
+    (U+FE0F, category 'Mn') that tells renderers to show the color-emoji
+    form. That selector alone doesn't match either the category or the
+    supplementary-plane checks below, so a first version of this function
+    silently left it behind — invisible in a text editor, but still a
+    real leftover character. Also strips the zero-width joiner (U+200D)
+    used to combine emoji into compound sequences, for the same reason.
+
+    Also collapses any double-space left behind when an emoji sat in the
+    middle of a sentence (e.g. "Drop a 🔥 if..." -> "Drop a if..." without
+    this step would leave "Drop a  if..." with a visible double gap)."""
+    import unicodedata, re
+    VARIATION_SELECTORS = range(0xFE00, 0xFE10)
+    ZERO_WIDTH_JOINER = 0x200D
+
+    def is_emoji_construction_char(ch):
+        code = ord(ch)
+        if code in VARIATION_SELECTORS or code == ZERO_WIDTH_JOINER:
+            return True
+        if unicodedata.category(ch) == "So":
+            return True
+        if code > 0x1F000:
+            return True
+        return False
+
+    stripped = "".join(ch for ch in text if not is_emoji_construction_char(ch))
+    return re.sub(r"[ \t]{2,}", " ", stripped).strip()
 
 def has_emoji(text):
-    """True if any character in text is an emoji-range symbol. Shared by
-    strip_emoji_for_display's callers and by audit_content.py, so both
-    use the exact same detection logic rather than two definitions that
-    could quietly drift apart."""
+    """True if any character in text is emoji or part of an emoji
+    construction (base symbol, variation selector, or zero-width joiner).
+    Shares detection logic with strip_emoji_for_display() so the two can
+    never quietly drift out of sync — see that function's docstring for
+    why variation selectors and ZWJ need explicit handling."""
     import unicodedata
-    return any(unicodedata.category(ch) == "So" or ord(ch) > 0x1F000 for ch in text)
+    VARIATION_SELECTORS = range(0xFE00, 0xFE10)
+    ZERO_WIDTH_JOINER = 0x200D
+    for ch in text:
+        code = ord(ch)
+        if code in VARIATION_SELECTORS or code == ZERO_WIDTH_JOINER:
+            return True
+        if unicodedata.category(ch) == "So":
+            return True
+        if code > 0x1F000:
+            return True
+    return False
 
 
 # ── LAYOUT AUTO-FIT (structural fix — not per-ID patches) ───────────────────
@@ -602,7 +635,16 @@ def composite_post(bg_img, verse_text, reference, mood, fonts, video_text=None):
 
     if video_text:
         # ── ENGAGEMENT REEL LAYOUT ────────────────────────────────────────────
-        wrapped_hook = wrap_text(video_text, fonts["hook"], W - 140, draw)
+        # Bug found in final adversarial review: 28/424 engagement_reels.csv
+        # rows have emoji in video_text (e.g. "Drop a 🔥 if..."), which this
+        # branch draws directly with Pillow — same broken-glyph issue fixed
+        # elsewhere for night/morning, just never caught here since this
+        # pipeline predates that work and was explicitly out of scope for
+        # every later corrective pass. video_text is ONLY ever used for
+        # on-image rendering (the separate 'caption' field is what's sent
+        # to Instagram/Facebook), so stripping here has zero effect on
+        # captions — safe, and closes the same bug class everywhere at once.
+        wrapped_hook = wrap_text(strip_emoji_for_display(video_text), fonts["hook"], W - 140, draw)
         sy = 80
         for lt, lh in wrapped_hook:
             bbox = draw.textbbox((0, 0), lt, font=fonts["hook"])
@@ -694,7 +736,7 @@ def composite_night_post(bg_img, hook, prayer, scripture, ref, ending, fonts):
               font=ref_font, fill=(210, 210, 255, 200))
 
     sy = SAFE_TOP
-    for lt, lh in wrap_text(hook, hook_font, W - 140, draw):
+    for lt, lh in wrap_text(strip_emoji_for_display(hook), hook_font, W - 140, draw):
         bbox = draw.textbbox((0, 0), lt, font=hook_font)
         x    = (W - (bbox[2] - bbox[0])) // 2
         draw_text_shadow(draw, x, sy, lt, hook_font, (255, 255, 255, 245))
@@ -704,7 +746,7 @@ def composite_night_post(bg_img, hook, prayer, scripture, ref, ending, fonts):
     draw.line([(W//2 - 40, sy), (W//2 + 40, sy)], fill=(210, 210, 255, 90), width=1)
     sy += 34
 
-    for lt, lh in wrap_text(prayer, verse_font, W - 160, draw):
+    for lt, lh in wrap_text(strip_emoji_for_display(prayer), verse_font, W - 160, draw):
         bbox = draw.textbbox((0, 0), lt, font=verse_font)
         x    = (W - (bbox[2] - bbox[0])) // 2
         draw_text_shadow(draw, x, sy, lt, verse_font, (235, 235, 255, 240))
@@ -771,7 +813,7 @@ def composite_morning_post(bg_img, question, choices, scripture, ref, cta, fonts
               font=ref_font, fill=(80, 45, 10, 210))
 
     sy = SAFE_TOP
-    for lt, lh in wrap_text(question, hook_font, W - 140, draw):
+    for lt, lh in wrap_text(strip_emoji_for_display(question), hook_font, W - 140, draw):
         bbox = draw.textbbox((0, 0), lt, font=hook_font)
         x    = (W - (bbox[2] - bbox[0])) // 2
         draw_text_shadow(draw, x, sy, lt, hook_font, (60, 30, 5, 250), shadow=(255, 255, 255, 90))

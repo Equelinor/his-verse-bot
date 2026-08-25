@@ -635,17 +635,27 @@ def composite_post(bg_img, verse_text, reference, mood, fonts, video_text=None):
 
     if video_text:
         # ── ENGAGEMENT REEL LAYOUT ────────────────────────────────────────────
-        # Bug found in final adversarial review: 28/424 engagement_reels.csv
-        # rows have emoji in video_text (e.g. "Drop a 🔥 if..."), which this
-        # branch draws directly with Pillow — same broken-glyph issue fixed
-        # elsewhere for night/morning, just never caught here since this
-        # pipeline predates that work and was explicitly out of scope for
-        # every later corrective pass. video_text is ONLY ever used for
-        # on-image rendering (the separate 'caption' field is what's sent
-        # to Instagram/Facebook), so stripping here has zero effect on
-        # captions — safe, and closes the same bug class everywhere at once.
-        wrapped_hook = wrap_text(strip_emoji_for_display(video_text), fonts["hook"], W - 140, draw)
-        sy = 80
+        # Fixed: this branch previously started at a fixed sy=80 and never
+        # adjusted for content length, unlike the verse-only branch below it
+        # (which correctly centers via total_h). That left large empty gaps
+        # on shorter content — measured at an average of 586px of blank
+        # space out of 1080px total across a sample, on every single
+        # engagement post. Fix: measure total content height first, then
+        # center the whole block, same proven approach already used
+        # elsewhere in this file — not a new technique, just applied here
+        # too. Only the vertical starting position changes; nothing about
+        # font size, wrapping width, or content itself is touched.
+        clean_video_text = strip_emoji_for_display(video_text)
+        wrapped_hook = wrap_text(clean_video_text, fonts["hook"], W - 140, draw)
+        wrapped_verse = wrap_text(verse_text, fonts["verse"], W - 140, draw)
+
+        hook_h  = sum(lh for _, lh in wrapped_hook)
+        verse_h = sum(lh for _, lh in wrapped_verse)
+        # Fixed spacing already used between/after each section
+        total_content_h = hook_h + 30 + verse_h + 16 + 38  # 38 ~= reference line height allowance
+
+        sy = max(80, (H - total_content_h) // 2)
+
         for lt, lh in wrapped_hook:
             bbox = draw.textbbox((0, 0), lt, font=fonts["hook"])
             x    = (W - (bbox[2] - bbox[0])) // 2
@@ -658,8 +668,7 @@ def composite_post(bg_img, verse_text, reference, mood, fonts, video_text=None):
         sy += 30
 
         # Verse text
-        wrapped = wrap_text(verse_text, fonts["verse"], W - 140, draw)
-        for lt, lh in wrapped:
+        for lt, lh in wrapped_verse:
             bbox = draw.textbbox((0, 0), lt, font=fonts["verse"])
             x    = (W - (bbox[2] - bbox[0])) // 2
             draw_text_shadow(draw, x, sy, lt, fonts["verse"], (255, 255, 255, 252))

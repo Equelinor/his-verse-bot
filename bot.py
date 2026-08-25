@@ -494,6 +494,30 @@ def draw_text_shadow(draw, x, y, text, font, fill, shadow=(0,0,0,115)):
     draw.text((x+2, y+3), text, font=font, fill=shadow)
     draw.text((x,   y),   text, font=font, fill=fill)
 
+def strip_emoji_for_display(text):
+    """Remove emoji before drawing text INTO an image with Pillow — the
+    fallback fonts used here don't carry emoji glyphs, so they render as
+    a broken box. This only affects what gets drawn on the image; the
+    original text (with emoji intact) is still used for the caption sent
+    to Instagram/Facebook, which render emoji correctly on their own.
+    Bug found during final pre-launch review: endings/CTAs pulled from the
+    content pool can contain emoji (e.g. 🤍, 🙏) that weren't caught by
+    the earlier title/choice-icon fix, since those only stripped emoji
+    from specific known-emoji fields, not every field that gets drawn."""
+    import unicodedata
+    return "".join(
+        ch for ch in text
+        if not (unicodedata.category(ch) == "So" or ord(ch) > 0x1F000)
+    ).rstrip()
+
+def has_emoji(text):
+    """True if any character in text is an emoji-range symbol. Shared by
+    strip_emoji_for_display's callers and by audit_content.py, so both
+    use the exact same detection logic rather than two definitions that
+    could quietly drift apart."""
+    import unicodedata
+    return any(unicodedata.category(ch) == "So" or ord(ch) > 0x1F000 for ch in text)
+
 
 # ── LAYOUT AUTO-FIT (structural fix — not per-ID patches) ───────────────────
 # Before rendering night/morning posts, measure total required content
@@ -700,8 +724,9 @@ def composite_night_post(bg_img, hook, prayer, scripture, ref, ending, fonts):
     draw.line([(W//2 - 40, sy), (W//2 + 40, sy)], fill=(210, 210, 255, 70), width=1)
     sy += 34
 
-    bbox_e = draw.textbbox((0, 0), ending, font=handle_font)
-    draw.text(((W - (bbox_e[2] - bbox_e[0])) // 2, sy), ending,
+    ending_display = strip_emoji_for_display(ending)
+    bbox_e = draw.textbbox((0, 0), ending_display, font=handle_font)
+    draw.text(((W - (bbox_e[2] - bbox_e[0])) // 2, sy), ending_display,
               font=handle_font, fill=(255, 255, 255, 215))
 
     bbox_h = draw.textbbox((0, 0), HANDLE, font=handle_font)
@@ -777,8 +802,9 @@ def composite_morning_post(bg_img, question, choices, scripture, ref, cta, fonts
     draw.line([(W//2 - 40, sy), (W//2 + 40, sy)], fill=(90, 55, 15, 70), width=1)
     sy += 34
 
-    bbox_c = draw.textbbox((0, 0), cta, font=handle_font)
-    draw.text(((W - (bbox_c[2] - bbox_c[0])) // 2, sy), cta,
+    cta_display = strip_emoji_for_display(cta)
+    bbox_c = draw.textbbox((0, 0), cta_display, font=handle_font)
+    draw.text(((W - (bbox_c[2] - bbox_c[0])) // 2, sy), cta_display,
               font=handle_font, fill=(50, 25, 5, 225))
 
     bbox_h = draw.textbbox((0, 0), HANDLE, font=handle_font)

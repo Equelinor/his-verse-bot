@@ -2,19 +2,28 @@ name: Daily Bible Verse Post
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # 2:00 PM Bahrain — verse post
-    - cron: '0 17 * * *'   # 8:00 PM Bahrain — engagement post
+    - cron: '30 23 * * *'  # 2:30 AM Bahrain (next day) — Before You Sleep
+    - cron: '0 11 * * *'   # 2:00 PM Bahrain — verse post (unchanged)
+    - cron: '0 14 * * *'   # 5:00 PM Bahrain — What Do You Need Today?
+    - cron: '0 17 * * *'   # 8:00 PM Bahrain — engagement post (unchanged)
   workflow_dispatch:
     inputs:
       preview:
         description: 'Preview only (no posting)?'
         default: 'false'
       verse_id:
-        description: 'Force verse ID (optional)'
+        description: 'Force verse ID (optional, verse mode only)'
         default: ''
       mode:
-        description: 'Post mode: verse or engagement'
+        description: 'Post mode: verse, engagement, night, or morning'
         default: 'verse'
+
+# Prevents two runs (e.g. a scheduled trigger and a manual dispatch) from
+# reading/writing the shared state cache at the same time, which could
+# otherwise cause the same content to be selected twice.
+concurrency:
+  group: his-verse-bot-posting
+  cancel-in-progress: false
 
 jobs:
   post_verse:
@@ -30,38 +39,61 @@ jobs:
         run: |
           sudo apt-get update --fix-missing && sudo apt-get install -y ffmpeg --fix-missing
           pip install Pillow requests
+
+      # Explicit restore/save (not the ambiguous single cache@v4 action) so
+      # it's unambiguous exactly when state is read vs written.
       - name: Restore verse rotation state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/state.json
           key: verse-state-${{ github.run_number }}
           restore-keys: verse-state-
       - name: Restore engagement rotation state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/engagement_state.json
           key: engagement-state-${{ github.run_number }}
           restore-keys: engagement-state-
+      - name: Restore night rotation state
+        uses: actions/cache/restore@v4
+        with:
+          path: data/night_state.json
+          key: night-state-${{ github.run_number }}
+          restore-keys: night-state-
+      - name: Restore morning rotation state
+        uses: actions/cache/restore@v4
+        with:
+          path: data/morning_state.json
+          key: morning-state-${{ github.run_number }}
+          restore-keys: morning-state-
+      - name: Restore same-day Scripture reservations
+        uses: actions/cache/restore@v4
+        with:
+          path: data/daily_scripture_reservations.json
+          key: scripture-reservations-${{ github.run_number }}
+          restore-keys: scripture-reservations-
 
       - name: Determine post mode
         id: mode
         run: |
-          # Priority 1: manual override via workflow_dispatch
           if [ "${{ github.event.inputs.mode }}" = "engagement" ]; then
             echo "MODE=engagement" >> "$GITHUB_ENV"
-            echo "→ Mode: engagement (manual override)"
+          elif [ "${{ github.event.inputs.mode }}" = "night" ]; then
+            echo "MODE=night" >> "$GITHUB_ENV"
+          elif [ "${{ github.event.inputs.mode }}" = "morning" ]; then
+            echo "MODE=morning" >> "$GITHUB_ENV"
           elif [ "${{ github.event.inputs.mode }}" = "verse" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "MODE=verse" >> "$GITHUB_ENV"
-            echo "→ Mode: verse (manual override)"
-          # Priority 2: which cron schedule actually fired this run —
-          # reliable regardless of execution delay, unlike checking wall-clock hour
+          elif [ "${{ github.event.schedule }}" = "30 23 * * *" ]; then
+            echo "MODE=night" >> "$GITHUB_ENV"
+          elif [ "${{ github.event.schedule }}" = "0 14 * * *" ]; then
+            echo "MODE=morning" >> "$GITHUB_ENV"
           elif [ "${{ github.event.schedule }}" = "0 17 * * *" ]; then
             echo "MODE=engagement" >> "$GITHUB_ENV"
-            echo "→ Mode: engagement (matched 17:00 UTC schedule)"
           else
             echo "MODE=verse" >> "$GITHUB_ENV"
-            echo "→ Mode: verse (matched 11:00 UTC schedule or default)"
           fi
+          echo "Resolved mode: $MODE"
 
       - name: Run bot
         env:
@@ -75,22 +107,51 @@ jobs:
           ARGS=""
           if [ "${{ github.event.inputs.preview }}" = "true" ]; then ARGS="$ARGS --preview"; fi
           if [ -n "${{ github.event.inputs.verse_id }}" ]; then ARGS="$ARGS --verse ${{ github.event.inputs.verse_id }}"; fi
-          echo "Running bot.py with mode=$MODE"
           python bot.py $ARGS --mode $MODE
 
+      # Explicit save — always runs (even on failure) so a partial state
+      # update from a failed-but-partway run isn't silently lost, and the
+      # reservation release-on-failure logic in bot.py is actually persisted.
       - name: Save verse rotation state
-        uses: actions/cache@v4
+        if: always()
+        uses: actions/cache/save@v4
         with:
           path: data/state.json
           key: verse-state-${{ github.run_number }}
       - name: Save engagement rotation state
-        uses: actions/cache@v4
+        if: always()
+        uses: actions/cache/save@v4
         with:
           path: data/engagement_state.json
           key: engagement-state-${{ github.run_number }}
+      - name: Save night rotation state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/night_state.json
+          key: night-state-${{ github.run_number }}
+      - name: Save morning rotation state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/morning_state.json
+          key: morning-state-${{ github.run_number }}
+      - name: Save same-day Scripture reservations
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/daily_scripture_reservations.json
+          key: scripture-reservations-${{ github.run_number }}
+
+      - name: Check content inventory
+        if: always()
+        run: python check_inventory.py
+
       - name: Upload post image
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: post-${{ github.run_number }}
           path: output/*.jpg
           retention-days: 30
+          if-no-files-found: ignore

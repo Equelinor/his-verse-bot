@@ -105,6 +105,7 @@ jobs:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
         run: |
           ARGS=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --scheduled"; fi
           if [ "${{ github.event.inputs.preview }}" = "true" ]; then ARGS="$ARGS --preview"; fi
           if [ -n "${{ github.event.inputs.verse_id }}" ]; then ARGS="$ARGS --verse ${{ github.event.inputs.verse_id }}"; fi
           python bot.py $ARGS --mode $MODE

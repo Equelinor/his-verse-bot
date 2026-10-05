@@ -28,6 +28,7 @@ Usage:
 """
 
 import os
+import sys
 import csv
 import json
 import base64
@@ -53,8 +54,42 @@ def bahrain_now():
     return datetime.datetime.now(BAHRAIN_TZ)
 
 def bahrain_today():
-    """Today's date string (YYYY-MM-DD) in Asia/Bahrain."""
+    """Date string (YYYY-MM-DD) this run's post belongs to.
+    Scheduled runs: the date of the SLOT the run was scheduled for (see
+    compute_slot_date) — GitHub often starts runs hours late, and an 8 PM
+    run that starts after midnight must still count as the previous day's
+    8 PM post. Manual runs: the Bahrain calendar date right now."""
+    if _SLOT_DATE:
+        return _SLOT_DATE
     return bahrain_now().strftime("%Y-%m-%d")
+
+
+# ── SLOT DATE (late-run fix) ──────────────────────────────────────────────────
+# Bahrain local time each package is scheduled for (must match the crons in
+# .github/workflows/daily_post.yml).
+SLOT_TIMES = {
+    "night":      (2, 30),   # 30 23 * * * UTC
+    "verse":      (14, 0),   # 0 11 * * * UTC
+    "morning":    (17, 0),   # 0 14 * * * UTC
+    "engagement": (20, 0),   # 0 17 * * * UTC
+}
+_SLOT_DATE = None
+
+def compute_slot_date(mode, now=None):
+    """Date of the most recent occurrence of this package's slot time.
+    e.g. engagement (8 PM) starting at 00:16 on Oct 3 -> '2026-10-02'."""
+    now = now or bahrain_now()
+    h, m = SLOT_TIMES[mode]
+    slot = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if now < slot:
+        slot -= datetime.timedelta(days=1)
+    return slot.strftime("%Y-%m-%d")
+
+
+class PostNotSent(Exception):
+    """Raised when a run ends WITHOUT handing a post to Make. main() turns
+    this into exit code 1 so GitHub marks the run as failed (red) and emails
+    you, instead of showing a green tick for a post that never went out."""
 
 
 # ── PATHS ─────────────────────────────────────────────────────────────────────
@@ -212,6 +247,8 @@ def save_morning_state(state):
 # because it's driven by the actual reference being used TODAY, not by
 # static row position in any CSV.
 
+_RESERVED_THIS_RUN = None
+
 def _load_reservations():
     if SCRIPTURE_RESERVATION_FILE.exists():
         try:
@@ -241,6 +278,8 @@ def reserve_scripture_for_today(package, scripture_ref):
     day[package] = scripture_ref
     data[today] = day
     _save_reservations(data)
+    global _RESERVED_THIS_RUN
+    _RESERVED_THIS_RUN = package
     return True
 
 def release_reservation(package):
@@ -1151,7 +1190,7 @@ def run_verse(preview=False, verse_id=None, force=False):
     if not reserved:
         print("  ✗ Every candidate collided with today's Scripture reservations — "
               "aborting safely. No post will be published (no duplicate Scripture).")
-        return None, None
+        raise PostNotSent("every candidate collided with today's Scripture reservations")
 
     print(f"  📖 {verse['reference']}  ({verse['theme']} / {verse['mood']})")
 
@@ -1194,19 +1233,19 @@ def run_verse(preview=False, verse_id=None, force=False):
     if not image_url:
         print("  ✗ Upload failed — aborting (content remains UNUSED for retry)")
         release_reservation("verse")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  🔎 Verifying URL is accessible...")
     if not verify_url_is_accessible(image_url):
         release_reservation("verse")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  📱 Triggering Make webhook...")
     success = trigger_make(image_url, full_caption, package="verse", content_id=verse["id"])
     if not success:
         print("  ✗ Webhook not accepted — post remains UNUSED for retry")
         release_reservation("verse")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     # Update state ONLY after confirmed webhook acceptance
     posted = state.get("posted_ids", [])
@@ -1237,7 +1276,7 @@ def run_engagement(preview=False, force=False):
     if not reserved:
         print("  ✗ Every candidate collided with today's Scripture reservations — "
               "aborting safely. No post will be published (no duplicate Scripture).")
-        return None, None
+        raise PostNotSent("every candidate collided with today's Scripture reservations")
 
     print(f"  💬 Engagement Reel #{reel['id']} — {reel['format']}")
     print(f"  📖 {reel['verse_ref']}")
@@ -1285,19 +1324,19 @@ def run_engagement(preview=False, force=False):
     if not image_url:
         print("  ✗ Upload failed — aborting (content remains UNUSED for retry)")
         release_reservation("engagement")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  🔎 Verifying URL is accessible...")
     if not verify_url_is_accessible(image_url):
         release_reservation("engagement")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  📱 Triggering Make webhook...")
     success = trigger_make(image_url, full_caption, package="engagement", content_id=reel["id"])
     if not success:
         print("  ✗ Webhook not accepted — post remains UNUSED for retry")
         release_reservation("engagement")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     # Update state
     posted = state.get("posted_ids", [])
@@ -1328,7 +1367,7 @@ def run_night(preview=False, force=False):
     if not reserved:
         print("  ✗ Every candidate collided with today's Scripture reservations — "
               "aborting safely. No post will be published (no duplicate Scripture).")
-        return None, None
+        raise PostNotSent("every candidate collided with today's Scripture reservations")
 
     print(f"  🌙 Before You Sleep #{post['id']} — {post['theme']}")
     print(f"  📖 {post['scripture_ref']}")
@@ -1374,19 +1413,19 @@ def run_night(preview=False, force=False):
     if not image_url:
         print("  ✗ Upload failed — aborting (content remains UNUSED for retry)")
         release_reservation("night")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  🔎 Verifying URL is accessible...")
     if not verify_url_is_accessible(image_url):
         release_reservation("night")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  📱 Triggering Make webhook...")
     success = trigger_make(image_url, full_caption, package="night", content_id=post["id"])
     if not success:
         print("  ✗ Webhook not accepted — post remains UNUSED for retry")
         release_reservation("night")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     posted = state.get("posted_ids", [])
     posted.append(int(post["id"]))
@@ -1416,7 +1455,7 @@ def run_morning(preview=False, force=False):
     if not reserved:
         print("  ✗ Every candidate collided with today's Scripture reservations — "
               "aborting safely. No post will be published (no duplicate Scripture).")
-        return None, None
+        raise PostNotSent("every candidate collided with today's Scripture reservations")
 
     print(f"  ☀️ What Do You Need Today? #{post['id']} — {post['dominant_theme']}")
     print(f"  📖 {post['scripture_ref']}")
@@ -1462,19 +1501,19 @@ def run_morning(preview=False, force=False):
     if not image_url:
         print("  ✗ Upload failed — aborting (content remains UNUSED for retry)")
         release_reservation("morning")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  🔎 Verifying URL is accessible...")
     if not verify_url_is_accessible(image_url):
         release_reservation("morning")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     print("\n  📱 Triggering Make webhook...")
     success = trigger_make(image_url, full_caption, package="morning", content_id=post["id"])
     if not success:
         print("  ✗ Webhook not accepted — post remains UNUSED for retry")
         release_reservation("morning")
-        return None, None
+        raise PostNotSent("post was not handed to Make — see the ✗ line above")
 
     posted = state.get("posted_ids", [])
     posted.append(int(post["id"]))
@@ -1504,6 +1543,9 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="Override the same-package-same-Bahrain-day guard "
                              "(testing only — not for normal scheduled use)")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="Set by the workflow for cron runs: date the post by "
+                             "its scheduled slot, not by when GitHub started it")
     args = parser.parse_args()
 
     mode_labels = {
@@ -1517,14 +1559,31 @@ def main():
     print(f"   Mode: {mode_labels[args.mode]}")
     print("═══════════════════════════════════════════════\n")
 
-    if args.mode == "engagement":
-        run_engagement(preview=args.preview, force=args.force)
-    elif args.mode == "night":
-        run_night(preview=args.preview, force=args.force)
-    elif args.mode == "morning":
-        run_morning(preview=args.preview, force=args.force)
-    else:
-        run_verse(preview=args.preview, verse_id=args.verse, force=args.force)
+    if args.scheduled:
+        global _SLOT_DATE
+        _SLOT_DATE = compute_slot_date(args.mode)
+        print(f"   Slot date: {_SLOT_DATE} (scheduled run)\n")
+
+    try:
+        if args.mode == "engagement":
+            run_engagement(preview=args.preview, force=args.force)
+        elif args.mode == "night":
+            run_night(preview=args.preview, force=args.force)
+        elif args.mode == "morning":
+            run_morning(preview=args.preview, force=args.force)
+        else:
+            run_verse(preview=args.preview, verse_id=args.verse, force=args.force)
+    except PostNotSent as e:
+        print(f"\n  ❌ RUN FAILED — nothing was posted: {e}")
+        print("     Content stays unused and will be retried on the next run.\n")
+        sys.exit(1)
+    except Exception:
+        # Unexpected crash (image fetch, FFmpeg, GitHub upload...). Free the
+        # Scripture reservation this run made so it doesn't block others.
+        if _RESERVED_THIS_RUN:
+            release_reservation(_RESERVED_THIS_RUN)
+            print(f"\n  ❌ Crashed — released today's '{_RESERVED_THIS_RUN}' reservation")
+        raise
 
 
 if __name__ == "__main__":
